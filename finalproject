@@ -1,0 +1,292 @@
+% Christian Chapman
+% AE 403 Final Project Code
+clear
+clc
+close all
+
+%% orbit
+% define orbital parameters
+i = 90; % inclination, deg
+e = 0.01; % eccentricity, -
+w = 49; % argument of periapse, deg
+omega = -22; % right acsension of ascending node, deg
+M = 10*pi/180; % deg
+tof = 112*60; % time of flight, seconds
+t = [0,tof]; % time span for integration
+mu = 4.282*10^13; % gravitational parameter for Mars, m^3 / s^2
+j2 = 0.00196; % J2 perturbation for Mars
+R = 3396.2*10^3; % Mars radius, m
+a = (mu*(((112*60)/(2*pi))^2))^(1/3); % semimajor axis, m
+
+% Using AE402 code I used to convert orbital elements to position and
+% velocity
+ihat = [1 0 0];
+jhat = [0 1 0];
+khat = [0 0 1];
+% calculations
+Eguess = M;
+g = 1;
+it = 0;
+while abs(g) > 1e-10
+    g = Eguess - e*sin(Eguess) - M;
+    dg = 1 - e*cos(Eguess);
+    E1 = Eguess - g/dg;
+    %update
+    Eguess = E1;
+    it = it + 1;
+end
+E = Eguess*180/pi;
+f = 2*atan(sqrt((1-e)/(1+e))*tan(E/2));
+theta = w + f;
+
+% calculate magnitudes to eventually check against vectors
+h = sqrt(mu*a*(1 - e^2));
+r = (a*(1 - e^2)) / (1 + e*cosd(f));
+v = sqrt(mu*(2/r - 1/a));
+% determine r and v
+% r position vector (km)
+rbar = r*((cosd(theta)*cosd(omega) - cosd(i)*sind(omega)*sind(theta))*ihat + ...
+          (cosd(theta)*sind(omega) + cosd(i)*cosd(omega)*sind(theta))*jhat + ...
+          (sind(i)*sind(theta))*khat);
+check1 = norm(rbar) - r;
+% v velocity vector (km/s)
+vbar = (-mu/h)*(cosd(omega)*(sind(theta)+ e*sind(w)) + sind(omega)*(cosd(theta) + e*cosd(w))*cosd(i))*ihat + ...
+       (-mu/h)*(sind(omega)*(sind(theta)+ e*sind(w)) - cosd(omega)*(cosd(theta) + e*cosd(w))*cosd(i))*jhat + ...
+       (mu/h) *((cosd(theta) + e*cosd(w))*sind(i))*khat;
+check2 = norm(vbar) - v;
+
+% set up integration initialization
+r0 = rbar;
+v0 = vbar;
+P = 2*pi*sqrt(a^3/mu); 
+
+% set up ODE45 to evaluate orbit and variations over 100 days
+options = odeset('AbsTol',1e-10,'RelTol',1e-10);
+[t,X] = ode45(@eom_twobody,[t(1) t(end)],[r0; v0]',options,mu);
+
+% orbit plot
+figure(1)
+hold on
+planet3D('Mars')
+x_target = 2.1552e06;
+y_target = -8.7080e05;
+z_target = 2.4668e06;
+plot3(x_target, y_target, z_target, 'ro', 'MarkerSize', 10, 'MarkerFaceColor', 'r');
+plot3(X(1,1),X(1,2),X(1,3), 'go', 'MarkerSize', 8, 'MarkerFaceColor', 'g');
+plot3(X(:,1),X(:,2),X(:,3),'b-','Linewidth',2)
+title('Mars Pointing Spacecraft Orbit in Inertial Frame');
+xlabel('x [m]');
+ylabel('y [m]');
+zlabel('z [m]');
+
+%% attitude
+% using position and velocity to identify initial and target quaternion
+for i = 1:length(X)
+    rvec = [X(i,1); X(i,2); X(i,3)]; % m
+    vvec = [X(i,4); X(i,5); X(i,6)]; % m
+    ri = norm(rvec);
+    vi = norm(vvec);
+    o3i = -rvec/ri;
+    o2i = -cross(rvec,vvec)/norm(cross(rvec,vvec));
+    o1i = cross(o2i,o3i);
+    A_IO = [o1i o2i o3i]; % attitude matrix from orbital plane to inertial frame
+    phi = 0;
+    theta = 90;
+    psi = -90; % euler angles used to rotate spacecraft correctly in LVLH frame
+    A_BO = [cosd(phi)*cosd(theta),                                  sind(phi)*cosd(theta),                                 -sind(theta);
+            -sind(phi)*cosd(psi) + cosd(phi)*sind(theta)*sind(psi),  cosd(phi)*cosd(psi) + sind(phi)*sind(theta)*sind(psi),  cosd(theta)*sind(psi);
+             sind(phi)*sind(psi) + cosd(phi)*sind(theta)*cosd(psi), -cosd(phi)*sind(psi) + sind(phi)*sind(theta)*cosd(psi),  cosd(theta)*cosd(psi)]; % 3-2-1 rotation matrix
+    quat(:,i) = att2quat(A_BO*transpose(A_IO)); 
+end
+
+% spacecraft constants
+J = diag([800 850 950]); % kg m^2
+kp = 1; % -
+kd = 5; % -
+% initial conditions
+qb = [quat(1,1);quat(2,1);quat(3,1);quat(4,1)];
+wb = [0;0.1;0.1];
+% desired results
+qc = [quat(1,end);quat(2,end);quat(3,end);quat(4,end)];
+wc = [0;0;0];
+% calculate error
+dq = deltaq(qb,qc); % error quaternion
+
+% set initial conditions
+ic = zeros(1,11);
+ic(1) = wb(1);
+ic(2) = wb(2);
+ic(3) = wb(3);
+ic(4) = qb(1);
+ic(5) = qb(2);
+ic(6) = qb(3);
+ic(7) = qb(4);
+ic(8) = dq(1);
+ic(9) = dq(2);
+ic(10) = dq(3);
+ic(11) = dq(4);
+
+% integration
+tspan = [0 tof];
+opts = odeset('RelTol',1e-10,'AbsTol',1e-10);
+[t,a] = ode45(@feedback, tspan, ic, opts, J, kp, kd, qc, wc);
+
+% ENTIRE PLOT
+% angular velocity plot
+figure(2)
+plot(t, a(:, 1), 'r', t, a(:, 2), 'g', t, a(:, 3), 'b');
+xlabel('Time (s)');
+ylabel('Angular Velocity (rad/s)');
+legend('\omega_x', '\omega_y', '\omega_z');
+title('Spacecraft Angular Velocity Over One Orbit');
+% attitude plot
+figure(3)
+plot(t, a(:, 4), 'r', t, a(:, 5), 'g', t, a(:, 6), 'b', t, a(:, 7), 'k');
+xlabel('Time (s)');
+ylabel('Quaternion');
+legend('q_1', 'q_2', 'q_3','q_4');
+title('Spacecraft Attitude Over One Orbit');
+% attitude error plot
+figure(4)
+plot(t, a(:, 8), 'r', t, a(:, 9), 'g', t, a(:, 10), 'b', t, a(:, 11), 'k');
+xlabel('Time (s)');
+ylabel('Quaternion');
+legend('dq_1', 'dq_2', 'dq_3','dq_4');
+title('Spacecraft Attitude Error Over One Orbit');
+
+% FLIGHT ERROR PLOT
+% angular velocity plot
+figure(5)
+plot(t(1:20378), a(1:20378, 1), 'r', t(1:20378), a(1:20378, 2), 'g', t(1:20378), a(1:20378, 3), 'b');
+xlabel('Time (s)');
+ylabel('Angular Velocity (rad/s)');
+legend('\omega_x', '\omega_y', '\omega_z');
+title('Spacecraft Angular Velocity During Thrust Failure');
+% attitude plot
+figure(6)
+plot(t(1:20378), a(1:20378, 4), 'r', t(1:20378), a(1:20378, 5), 'g', t(1:20378), a(1:20378, 6), 'b', t(1:20378), a(1:20378, 7), 'k');
+xlabel('Time (s)');
+ylabel('Quaternion');
+legend('q_1', 'q_2', 'q_3','q_4');
+title('Spacecraft Attitude During Thrust Failure');
+% attitude error plot
+figure(7)
+plot(t(1:20378), a(1:20378, 8), 'r', t(1:20378), a(1:20378, 9), 'g', t(1:20378), a(1:20378, 10), 'b', t(1:20378), a(1:20378, 11), 'k');
+xlabel('Time (s)');
+ylabel('Quaternion');
+legend('dq_1', 'dq_2', 'dq_3','dq_4');
+title('Spacecraft Attitude Error During Thrust Failure');
+
+% CORRECTIVE FLIGHT PLOT
+% angular velocity plot
+figure(8)
+plot(t(20378:25945), a(20378:25945, 1), 'r', t(20378:25945), a(20378:25945, 2), 'g', t(20378:25945), a(20378:25945, 3), 'b');
+xlabel('Time (s)');
+ylabel('Angular Velocity (rad/s)');
+legend('\omega_x', '\omega_y', '\omega_z');
+title('Spacecraft Angular Velocity During Corrective Action');
+% attitude plot
+figure(9)
+plot(t(20378:25945), a(20378:25945, 4), 'r', t(20378:25945), a(20378:25945, 5), 'g', t(20378:25945), a(20378:25945, 6), 'b', t(20378:25945), a(20378:25945, 7), 'k');
+xlabel('Time (s)');
+ylabel('Quaternion');
+legend('q_1', 'q_2', 'q_3','q_4');
+title('Spacecraft Attitude During Corrective Action');
+% attitude error plot
+figure(10)
+plot(t(20378:25945), a(20378:25945, 8), 'r', t(20378:25945), a(20378:25945, 9), 'g', t(20378:25945), a(20378:25945, 10), 'b', t(20378:25945), a(20378:25945, 11), 'k');
+xlabel('Time (s)');
+ylabel('Quaternion');
+legend('dq_1', 'dq_2', 'dq_3','dq_4');
+title('Spacecraft Attitude Error During Corrective Action');
+
+% determining amount of torque on spacecraft over course of orbit
+for i=1:length(t)
+    if i <= 20378
+        r = [0;1.5;1]; % m
+        F = [0;.8;.6]; % N
+        L(:,i) = cross(r,F);
+        Lmag(i) = norm(L(:,i));
+    else
+        L(:,i) = -kp*[a(i,8); a(i,9); a(i,10)] - kd*[a(i,1); a(i,2); a(i,3)];
+        Lmag(i) = norm(L(:,i));
+    end
+end
+
+% torque magnitude plotting
+% torque plot
+figure(11)
+plot(t, Lmag, 'r');
+xlabel('Time (s)');
+ylabel('Torque (N-m)');
+title('Torque Acting on Spacecraft Over One Orbit');
+
+figure(12)
+plot(t, L(1, :), 'r', t, L(2, :), 'g', t, L(3, :), 'b');
+xlabel('Time (s)');
+ylabel('Torque (N-m)');
+legend('L_x', 'L_y', 'L_z');
+title('Torque Components Acting on Spacecraft');
+
+function z = feedback(t,ic,J,kp,kd,qc,wc)
+% function used to simulate errant torque and corrective action
+% pull out initial conditions
+w = [ic(1);ic(2);ic(3)]; % rad/s
+q = [ic(4);ic(5);ic(6);ic(7)]; % -
+dq = [ic(8);ic(9);ic(10);ic(11)]; % -
+dq13 = [dq(1);dq(2);dq(3)]; % -
+dq4 = dq(4); % -
+
+% torque inputs
+if t < 42*60 % 42 minutes of errant torque
+    r = [0;1.5;1]; % m
+    F = [0;.8;.6]; % N
+    L = cross(r,F); % N-m
+    wdot = J \ (L - cross(w, J * w)); % rad/s^2
+else % remaining time has corrective action
+    L = -kp*dq13 - kd*w; % kg m
+    wdot = -J \ (skew(w)*J*w + kp*sign(dq4)*dq13 + kd*w); % rad/s^2
+end
+
+qchange = qdot(q,w);
+dqdot13 = 0.5*skew(dq13)*w + 0.5*dq4*w;
+dqdot4 = -0.5*transpose(dq13)*w;
+
+% outputs
+z = zeros(11,1);
+z(1) = wdot(1);
+z(2) = wdot(2);
+z(3) = wdot(3);
+z(4) = qchange(1);
+z(5) = qchange(2);
+z(6) = qchange(3);
+z(7) = qchange(4);
+z(8) = dqdot13(1);
+z(9) = dqdot13(2);
+z(10) = dqdot13(3);
+z(11) = dqdot4;
+end
+
+
+% two body equation factoring in J2 perturbation. derived directly from
+% AE402 notes, original credit to Dr. Woollands
+function xdot = eom_twobody(t,x,mu)
+% define j2 value given in problem and perturbing gravitational
+% acceleration p due to J2, using Curtis Chapter 10 4th revised edition Eq
+% 10.30
+
+j2 = 0.00196;
+R = 3396.2*10^3; % m
+r = (x(1)^2 + x(2)^2 + x(3)^2)^(1/2); % m
+% opting to use special perturbation theory
+pJ2 = [((3/2)*((j2*mu*R^2)/r^4))*(x(1)/r)*(5*(x(3)/r)^2 - 1), ((3/2)*((j2*mu*R^2)/r^4))*(x(2)/r)*(5*(x(3)/r)^2 - 1), ((3/2)*((j2*mu*R^2)/r^4))*(x(3)/r)*(5*(x(3)/r)^2 - 3)];
+
+xdot(1) = x(4);
+xdot(2) = x(5);
+xdot(3) = x(6);
+xdot(4) = -mu * x(1) / ((x(1)^2 + x(2)^2 + x(3)^2)^(1/2))^3 + pJ2(1);
+xdot(5) = -mu * x(2) / ((x(1)^2 + x(2)^2 + x(3)^2)^(1/2))^3 + pJ2(2);
+xdot(6) = -mu * x(3) / ((x(1)^2 + x(2)^2 + x(3)^2)^(1/2))^3 + pJ2(3);
+
+xdot = xdot';
+end
